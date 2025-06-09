@@ -7,17 +7,14 @@ import os
 
 app = FastAPI(title="SemiAuto Main System", version="1.0")
 
-# Mount static files
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
 # Templates
 templates = Jinja2Templates(directory="templates")
 
 # Microservice URLs
 MICROSERVICES = {
-    "regression": "http://127.0.0.1:8030",
-    "classification": "http://127.0.0.1:8020",
-    "clustering": "http://127.0.0.1:8010"
+    "regression": "http://semiauto-regression:8030",
+    "classification": "http://semiauto-classification:8020",
+    "clustering": "http://semiauto-clustering:8010"
 }
 
 # Global variable to store selected service
@@ -40,20 +37,43 @@ async def select_service(request: Request):
     return RedirectResponse(url="/service-home", status_code=303)
 
 @app.get("/service-home")
-async def service_home(request: Request):  # Modified response type
+async def service_home(request: Request):
+    global selected_service  # Add this line
     if not selected_service:
         return RedirectResponse(url="/")
-    return await proxy_request(request, "")  # Proxies to microservice root
+    # Pass selected_service as the third argument
+    return await proxy_request(request, "", selected_service)
 
 # New catch-all route for all other endpoints
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
 async def catch_all(request: Request, path: str):
     if not selected_service:
         return RedirectResponse(url="/")
-    return await proxy_request(request, path)
+    return await proxy_request(request, path, selected_service)
 
-async def proxy_request(request: Request, path: str):
-    target_url = f"{MICROSERVICES[selected_service]}/{path}"
+
+# Add this ABOVE your existing catch-all route
+@app.api_route("/{service_name}-static/{file_path:path}", methods=["GET"])
+async def static_proxy(request: Request, service_name: str, file_path: str):
+    # Identify service
+    service = None
+    if service_name == "regression":
+        service = "regression"
+    elif service_name == "classification":
+        service = "classification"
+    elif service_name == "clustering":
+        service = "clustering"
+
+    if not service:
+        raise HTTPException(status_code=404, detail="Static path not recognized")
+
+    return await proxy_request(request, f"{service_name}-static/{file_path}", service)
+
+
+async def proxy_request(request: Request, path: str, service: str):
+    target_url = f"{MICROSERVICES[service]}/{path}"
+    # Ensure we don't create double slashes
+    target_url = target_url.replace("//", "/").replace(":/", "://")
     timeout = httpx.Timeout(300.0, connect=60.0)
 
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -61,7 +81,7 @@ async def proxy_request(request: Request, path: str):
             method=request.method,
             url=target_url,
             headers={k: v for k, v in request.headers.items()
-                     if k.lower() not in ["host", "content-length"]},  # Fixed headers
+                     if k.lower() not in ["host", "content-length"]},
             params=request.query_params,
             content=await request.body()
         )
@@ -71,7 +91,7 @@ async def proxy_request(request: Request, path: str):
         except httpx.ConnectError:
             raise HTTPException(
                 status_code=503,
-                detail=f"{selected_service.capitalize()} microservice unavailable"
+                detail=f"{service.capitalize()} microservice unavailable"
             )
 
         return Response(
@@ -82,4 +102,4 @@ async def proxy_request(request: Request, path: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
